@@ -8,6 +8,9 @@ const {
   ptyCommand,
   backendOrder,
   hasFanIn,
+  staticBackground,
+  parseOscBackground,
+  adaptForLight,
 } = require(path.join(__dirname, "..", "glowmaid"));
 
 let pass = 0;
@@ -240,5 +243,45 @@ eq(
   "pty quote single quote",
 );
 eq(ptyCommand("/bin/merman", [], "win32"), null, "pty unsupported platform");
+
+// ---- staticBackground: glow style, env and COLORFGBG pick the background --
+for (const [flags, env, want, name] of [
+  [["-s", "light"], {}, "light", "style flag"],
+  [["--style=dark"], {}, "dark", "style equals flag"],
+  [["-s", "dracula"], {}, "dark", "dark named style"],
+  [["-s", "notty"], {}, "none", "notty has no color"],
+  [[], { GLAMOUR_STYLE: "light" }, "light", "GLAMOUR_STYLE"],
+  [["-s", "dark"], { GLOWMAID_BG: "light" }, "light", "GLOWMAID_BG wins"],
+  [[], { GLOWM_BG: "dark" }, "dark", "legacy GLOWM_BG"],
+  [[], { COLORFGBG: "0;15" }, "light", "COLORFGBG light"],
+  [[], { COLORFGBG: "15;default;0" }, "dark", "COLORFGBG dark"],
+  [["-s", "auto"], {}, null, "auto asks terminal"],
+  [["-s", "my.json"], { GLOWMAID_BG: "auto" }, null, "json style unknown"],
+]) {
+  eq(staticBackground(flags, env), want, `bg ${name}`);
+}
+
+// ---- parseOscBackground: OSC 11 reply to light/dark ----------------------
+eq(parseOscBackground("\x1b]11;rgb:f0f0/eaea/d6d6\x1b\\"), "light", "osc light");
+eq(parseOscBackground("\x1b]11;rgb:1e/1e/2e\x07"), "dark", "osc dark 8-bit");
+eq(parseOscBackground("\x1b[?62;22c"), null, "osc no reply");
+
+// ---- adaptForLight: light foregrounds become dark, rest stays ------------
+eq(
+  adaptForLight("\x1b[38;2;245;230;211mA\x1b[0m"),
+  "\x1b[38;2;44;29;10mA\x1b[0m",
+  "light label darkened",
+);
+eq(
+  adaptForLight("\x1b[1;38;2;139;126;106m"),
+  "\x1b[1;38;2;139;126;106m",
+  "dark color kept",
+);
+eq(adaptForLight("\x1b[1;37m\x1b[97m"), "\x1b[1;30m\x1b[90m", "white to black");
+eq(
+  adaptForLight("\x1b[48;2;255;255;255;38;5;15m"),
+  "\x1b[48;2;255;255;255;38;5;15m",
+  "background and 256 colors kept",
+);
 
 console.log(`\n${pass} assertions passed`);

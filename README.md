@@ -65,8 +65,8 @@ still render, just uncolored.
 ## Install
 
 ```bash
-git clone <this> ~/Documents/me/glowmaid
-ln -sf ~/Documents/me/glowmaid/glowmaid /usr/local/bin/glowmaid
+git clone <this> ~/glowmaid
+ln -sf ~/glowmaid/glowmaid /usr/local/bin/glowmaid
 ```
 
 A `glowm` symlink alongside it also works — the command used to be called
@@ -82,26 +82,36 @@ glowmaid --clear-cache
 ```
 
 Arguments are glow's arguments. Anything glowmaid cannot preprocess — `--help`,
-`--version`, `--tui`, a directory, more than one source — is handed to glow
-as-is.
+`--version`, a directory, more than one source — is handed to glow as-is. With
+`-t`/`--tui`, the rendered document goes to the glow pager through a temp file
+that is removed when the pager closes.
 
 ## Configuration
 
-| Variable             | Default             | Meaning                              |
-| -------------------- | ------------------- | ------------------------------------ |
-| `GLOWMAID_THEME`     | `terra`             | termaid color theme                  |
-| `GLOWMAID_WIDTH`     | terminal width      | max diagram width                    |
-| `GLOWMAID_BACKEND`   | `auto`              | force `termaid`, `merman`, or `auto` |
-| `GLOWMAID_SHAPES`    | _degrade_           | `native` to render shapes as written |
-| `GLOWMAID_NO_CACHE`  | —                   | `1` bypasses the render cache        |
-| `GLOWMAID_CACHE_DIR` | `~/.cache/glowmaid` | cache location                       |
-| `GLOWMAID_DEBUG`     | —                   | `1` logs backend attempts to stderr  |
-| `NO_COLOR`           | —                   | any value disables diagram color     |
+| Variable             | Default             | Meaning                               |
+| -------------------- | ------------------- | ------------------------------------- |
+| `GLOWMAID_THEME`     | `terra`             | termaid color theme                   |
+| `GLOWMAID_WIDTH`     | terminal width      | max diagram width                     |
+| `GLOWMAID_BACKEND`   | `auto`              | force `termaid`, `merman`, or `auto`  |
+| `GLOWMAID_SHAPES`    | _degrade_           | `native` to render shapes as written  |
+| `GLOWMAID_NO_CACHE`  | —                   | `1` bypasses the render cache         |
+| `GLOWMAID_CACHE_DIR` | `~/.cache/glowmaid` | cache location                        |
+| `GLOWMAID_DEBUG`     | —                   | `1` logs backend attempts to stderr   |
+| `GLOWMAID_BG`        | `auto`              | `light` or `dark` terminal background |
+| `NO_COLOR`           | —                   | any value disables diagram color      |
 
 Themes with a background fill (`dracula`, `nord`, `gruvbox`, `monokai`,
 `solarized`) paint dark blocks that fight glow's own code-block styling, which
-is why the default is `terra` — mid-tone, no background, readable on light and
-dark terminals alike. `termaid --themes` lists them all.
+is why the default is `terra` — mid-tone, no background. `termaid --themes`
+lists them all.
+
+**Light and dark.** Diagram colors follow glow's style. With `-s light` (or a
+light terminal under `-s auto`), light text colors are mirrored to dark ones of
+the same hue, so labels stay readable. `-s dark` keeps the theme as-is, and
+`-s notty` / `-s ascii` drop diagram color. For `auto`, glowmaid looks at
+`GLAMOUR_STYLE` and `COLORFGBG`, then asks the terminal for its background, as
+glow does. If the terminal does not answer, dark is assumed. Set `GLOWMAID_BG`
+to skip the detection.
 
 ## How it works
 

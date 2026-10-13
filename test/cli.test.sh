@@ -193,6 +193,19 @@ out=$(run -w 0 -s light -- nonexistent.md)
 check "dashdash passthrough" "$out" "nonexistent"
 out=$(run -w 0 -s light /tmp)
 check "directory passthrough" "$out" "tui"
+mkdir -p stub
+cat > stub/glow <<'EOF'
+#!/bin/sh
+for last; do :; done
+echo "args: $*"
+cat "$last"
+EOF
+chmod +x stub/glow
+out=$(PATH="$DIR/stub:$PATH" run -t simple.md)
+check "tui gets rendered temp file" "$out" "simple.md"
+check "tui file has art" "$out" "┌"
+refute "tui file has no source" "$out" "A[Alpha]"
+refute "tui temp file removed" "$(ls "${TMPDIR:-/tmp}")" "glowmaid-"
 out=$(run --version)
 check "--version passthrough" "$out" "glow"
 out=$(run --help)
