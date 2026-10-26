@@ -11,6 +11,12 @@ const {
   staticBackground,
   parseOscBackground,
   adaptForLight,
+  flattenLineBreaks,
+  artWidth,
+  terminalWidth,
+  glowWidth,
+  fitToViewport,
+  resizeWatcher,
 } = require(path.join(__dirname, "..", "glowmaid"));
 
 let pass = 0;
@@ -284,4 +290,118 @@ eq(
   "background and 256 colors kept",
 );
 
-console.log(`\n${pass} assertions passed`);
+// ---- flattenLineBreaks: <br/> becomes a space, so labels can wrap --------
+eq(
+  flattenLineBreaks('A["a<br/>b<br>c<BR />d"]'),
+  'A["a b c d"]',
+  "br variants flattened",
+);
+eq(flattenLineBreaks("A[<b>x</b>]"), "A[<b>x</b>]", "other tags kept");
+
+// ---- artWidth: columns of the widest line, color and trailing space ignored
+eq(artWidth("\x1b[31m┌──┐\x1b[0m  \n│ab│\n└──┘"), 4, "art width");
+eq(artWidth(""), 0, "empty art width");
+
+// ---- glowWidth: -w, then GLOW_WIDTH, then glow.yml; 0 means "ask the terminal"
+const fs = require("node:fs");
+const os = require("node:os");
+const cfgDir = fs.mkdtempSync(path.join(os.tmpdir(), "glowmaid-test-"));
+const cfg = path.join(cfgDir, "glow.yml");
+fs.writeFileSync(cfg, 'style: "auto"\nwidth: 70\n');
+const noCfg = { XDG_CONFIG_HOME: cfgDir };
+for (const [flags, env, want, name] of [
+  [["-w", "60"], {}, 60, "glow -w"],
+  [["--width=90", "--config", cfg], {}, 90, "glow --width= beats config"],
+  [[], { GLOW_WIDTH: "100", XDG_CONFIG_HOME: cfgDir }, 100, "GLOW_WIDTH"],
+  [["--config", cfg], {}, 70, "glow.yml width"],
+  [["-w", "0", "--config", cfg], {}, null, "-w 0 asks the terminal"],
+  [[], noCfg, null, "no config"],
+]) {
+  eq(glowWidth(flags, env, "linux"), want, `glow width ${name}`);
+}
+
+// ---- terminalWidth: GLOWMAID_WIDTH, then glow width capped by terminal ---
+const savedWidth = process.env.GLOWMAID_WIDTH;
+delete process.env.GLOWMAID_WIDTH;
+for (const [flags, columns, want, name] of [
+  [[], "90", 90, "terminal"],
+  [[], "200", 120, "terminal capped like glow"],
+  [["-w", "60"], "90", 60, "glow -w"],
+  [["-w", "150"], "90", 90, "glow -w capped by terminal"],
+]) {
+  eq(
+    terminalWidth(flags, { ...noCfg, COLUMNS: columns }, "linux"),
+    want,
+    `width ${name}`,
+  );
+}
+process.env.GLOWMAID_WIDTH = "130";
+eq(terminalWidth(["-w", "60"], noCfg, "linux"), 130, "GLOWMAID_WIDTH wins");
+if (savedWidth === undefined) delete process.env.GLOWMAID_WIDTH;
+else process.env.GLOWMAID_WIDTH = savedWidth;
+fs.rmSync(cfgDir, { recursive: true, force: true });
+
+// ---- fitToViewport: too-wide art becomes source unless output can scroll -
+const wide = { ok: true, type: "graph", out: "x", width: 120 };
+const narrow = { ok: true, type: "graph", out: "y", width: 50 };
+let fitted = fitToViewport([wide, narrow], 80, false);
+eq(fitted[0].ok, false, "wide art dropped");
+eq(fitted[0].reason, "too wide (120 > 80 cols), use -p to scroll", "wide note");
+eq(fitted[1], narrow, "narrow art kept");
+fitted = fitToViewport([wide], 80, true);
+eq(fitted[0], wide, "wide art kept when output scrolls");
+
+// ---- resizeWatcher: write the file only when the text changes ------------
+(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "glowmaid-test-"));
+  const file = path.join(dir, "doc.md");
+  fs.writeFileSync(file, "v1");
+  const writes = () => fs.statSync(file).mtimeMs;
+
+  let next = "v1";
+  let renders = 0;
+  const watcher = resizeWatcher(
+    async () => {
+      renders += 1;
+      if (next === "boom") throw new Error("render failed");
+      return next;
+    },
+    file,
+    "v1",
+    0,
+  );
+
+  const before = writes();
+  await watcher.update();
+  eq(fs.readFileSync(file, "utf8"), "v1", "same text kept");
+  eq(writes(), before, "same text not written");
+
+  next = "v2";
+  await watcher.update();
+  eq(fs.readFileSync(file, "utf8"), "v2", "changed text written");
+
+  next = "boom";
+  await watcher.update();
+  eq(fs.readFileSync(file, "utf8"), "v2", "failed render keeps file");
+
+  next = "v3";
+  renders = 0;
+  const first = watcher.update();
+  watcher.update();
+  watcher.update();
+  await first;
+  eq(renders, 2, "resizes during a render collapse into one more render");
+  eq(fs.readFileSync(file, "utf8"), "v3", "latest text written");
+
+  watcher.stop();
+  next = "v4";
+  await watcher.update();
+  eq(fs.readFileSync(file, "utf8"), "v3", "stopped watcher does not write");
+  eq(fs.readdirSync(dir).join(","), "doc.md", "no temp file left");
+
+  fs.rmSync(dir, { recursive: true, force: true });
+  console.log(`\n${pass} assertions passed`);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

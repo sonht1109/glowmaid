@@ -136,6 +136,16 @@ graph TD
 ```
 EOF
 
+# Too wide for -w 40, whatever the backend does.
+cat > wide.md <<'EOF2'
+# Wide
+
+```mermaid
+graph LR
+  A[First long label] --> B[Second long label] --> C[Third long label]
+```
+EOF2
+
 echo "=== input modes ==="
 out=$(run -w 0 -s light simple.md)
 check "file arg renders" "$out" "┌───────┐"
@@ -198,6 +208,7 @@ cat > stub/glow <<'EOF'
 #!/bin/sh
 for last; do :; done
 echo "args: $*"
+echo "pager: ${PAGER:-unset}"
 cat "$last"
 EOF
 chmod +x stub/glow
@@ -206,6 +217,16 @@ check "tui gets rendered temp file" "$out" "simple.md"
 check "tui file has art" "$out" "┌"
 refute "tui file has no source" "$out" "A[Alpha]"
 refute "tui temp file removed" "$(ls "${TMPDIR:-/tmp}")" "glowmaid-"
+out=$(export PATH="$DIR/stub:$PATH"; unset PAGER; run -w 40 -p wide.md)
+check "pager scrolls wide art" "$out" "pager: less -RS"
+check "pager keeps wide art" "$out" "Third long label"
+out=$(export PATH="$DIR/stub:$PATH" PAGER=more; run -w 40 -p wide.md)
+check "user PAGER kept" "$out" "pager: more"
+out=$(export PATH="$DIR/stub:$PATH"; unset PAGER; run -w 0 -p simple.md)
+check "pager untouched when art fits" "$out" "pager: unset"
+out=$(run -w 40 -s light wide.md)
+check "pipe keeps wide art" "$out" "┌"
+refute "pipe has no too-wide note" "$out" "too wide"
 out=$(run --version)
 check "--version passthrough" "$out" "glow"
 out=$(run --help)

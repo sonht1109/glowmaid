@@ -84,14 +84,14 @@ glowmaid --clear-cache
 Arguments are glow's arguments. Anything glowmaid cannot preprocess — `--help`,
 `--version`, a directory, more than one source — is handed to glow as-is. With
 `-t`/`--tui`, the rendered document goes to the glow pager through a temp file
-that is removed when the pager closes.
+that is removed when the pager closes. Diagrams follow terminal resizes there.
 
 ## Configuration
 
 | Variable             | Default             | Meaning                               |
 | -------------------- | ------------------- | ------------------------------------- |
 | `GLOWMAID_THEME`     | `terra`             | termaid color theme                   |
-| `GLOWMAID_WIDTH`     | terminal width      | max diagram width                     |
+| `GLOWMAID_WIDTH`     | glow's wrap width   | max diagram width                     |
 | `GLOWMAID_BACKEND`   | `auto`              | force `termaid`, `merman`, or `auto`  |
 | `GLOWMAID_SHAPES`    | _degrade_           | `native` to render shapes as written  |
 | `GLOWMAID_NO_CACHE`  | —                   | `1` bypasses the render cache         |
@@ -142,6 +142,26 @@ validated against plain output before use and falls back to `--no-color` if it
 looks wrong, or if `script` is missing. Other platforms skip straight to plain
 output.
 
+**Wide diagrams.** glow word-wraps code blocks at its wrap width, and the
+terminal wraps any longer line. Both tear box art. So glowmaid uses glow's
+width: `-w`, then `GLOW_WIDTH`, then `width` in `glow.yml`, never more than
+the terminal. `<br/>` in labels becomes a space, so the backend can wrap the
+label. If the art is still too wide, the other backend is tried and the
+narrowest result is kept. If that is still too wide:
+
+- with `-p`, the art is kept and the pager is `less -RS`, so you scroll
+  sideways. A `PAGER` you set is used as-is.
+- when the output is piped, the art is kept (`glowmaid doc.md | less -RS`).
+- in the terminal and with `-t`, the source is shown with a note, because the
+  terminal wraps the art and the glow TUI cuts it.
+
+**Resize in `-t`.** glowmaid keeps running while the glow TUI is open. When
+you resize the terminal, it renders the diagrams again for the new width and
+rewrites the temp file, and glow reloads it. glow jumps back to the top on a
+reload, so the file is rewritten only when the text changes. To let text and
+diagrams follow the window, leave `width` unset (or `0`) in `glow.yml`; a
+fixed width stays fixed.
+
 **Cache.** Rendered diagrams are cached under `~/.cache/glowmaid`, keyed on the
 diagram source, backend binary, options, and glowmaid's own revision, so
 upgrading a backend or editing glowmaid invalidates it automatically. Three
@@ -150,10 +170,10 @@ diagrams render in about 0.2s; a cached rerun is about 0.05s.
 ## Development
 
 ```bash
-node test/unit.test.js      # 71 assertions: fence parsing, shapes, routing
+node test/unit.test.js      # 116 assertions: fence parsing, shapes, routing
 bash test/cli.test.sh       # end-to-end through glow
 ```
 
 Both run against the working copy, not `$PATH`. The script exports
 `normalizeShapes`, `findFences`, `diagramType`, `hasFanIn`, `backendOrder`,
-`scrubPty` and `ptyCommand` for testing.
+`scrubPty`, `ptyCommand` and the width helpers for testing.

@@ -45,7 +45,9 @@ const CACHE_MAX_FILES = 800;
 const MAX_PARALLEL = Math.max(2, Math.min(8, (os.cpus() || [null]).length));
 const DEFAULT_THEME = "terra";
 const DEFAULT_WIDTH = 100;
-const WIDTH_MARGIN = 4; // glow indents code blocks a little
+const WIDTH_MARGIN = 6; // glow's document and code block margins
+const GLOW_MAX_WIDTH = 120;
+const RESIZE_DELAY_MS = 150; // wait for a drag-resize to settle
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 // Glyphs any backend emits for real diagram art: box drawing, block elements,
@@ -71,13 +73,55 @@ function die(msg) {
   process.exit(1);
 }
 
-/** Terminals report width on stdout; COLUMNS covers piped invocations. */
-function terminalWidth() {
-  const fromEnv = Number(envOpt("WIDTH") || process.env.COLUMNS);
-  if (Number.isFinite(fromEnv) && fromEnv > 20) return Math.floor(fromEnv);
-  const cols = process.stdout.columns || process.stderr.columns;
-  if (Number.isFinite(cols) && cols > 20) return cols;
-  return DEFAULT_WIDTH;
+const positiveInt = (value) => {
+  const n = Number(value);
+  return value != null && Number.isFinite(n) && n > 20 ? Math.floor(n) : null;
+};
+
+function glowConfigPath(flags, env, platform) {
+  const flag = flagValue(flags, "--config");
+  if (flag) return flag;
+  if (platform === "darwin")
+    return home("Library", "Preferences", "glow", "glow.yml");
+  return path.join(env.XDG_CONFIG_HOME || home(".config"), "glow", "glow.yml");
+}
+
+function glowConfigWidth(file) {
+  try {
+    const m = /^width:\s*(\d+)/m.exec(fs.readFileSync(file, "utf8"));
+    return m ? m[1] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The width glow wraps at: -w, then GLOW_WIDTH, then `width` in glow.yml.
+ * Zero means glow uses the terminal width, up to GLOW_MAX_WIDTH.
+ * Null when glow decides from the terminal.
+ */
+function glowWidth(flags, env = process.env, platform = process.platform) {
+  const value =
+    flagValue(flags, "-w", "--width") ??
+    env.GLOW_WIDTH ??
+    glowConfigWidth(glowConfigPath(flags, env, platform));
+  return positiveInt(value);
+}
+
+/**
+ * GLOWMAID_WIDTH wins. Otherwise use glow's wrap width, but never more than
+ * the terminal. Terminals report width on stdout; COLUMNS covers piped
+ * invocations.
+ */
+function terminalWidth(flags = [], env = process.env, platform) {
+  const forced = positiveInt(envOpt("WIDTH"));
+  if (forced) return forced;
+  const term =
+    positiveInt(env.COLUMNS) ||
+    positiveInt(process.stdout.columns || process.stderr.columns);
+  const wrap = glowWidth(flags, env, platform);
+  if (wrap) return term ? Math.min(wrap, term) : wrap;
+  return term ? Math.min(term, GLOW_MAX_WIDTH) : DEFAULT_WIDTH;
 }
 
 function findBinary(names, extraDirs) {
@@ -112,6 +156,13 @@ function stamp(file) {
 }
 
 const plain = (s) => s.replace(ANSI_RE, "");
+
+/** Columns of the widest line. Box-drawing glyphs are one column each. */
+function artWidth(out) {
+  return plain(out)
+    .split("\n")
+    .reduce((max, line) => Math.max(max, [...line.trimEnd()].length), 0);
+}
 
 // ----------------------------------------------------------------- backends
 
@@ -376,6 +427,12 @@ function normalizeShapes(src) {
   return out;
 }
 
+/**
+ * Backends print `<br/>` as text, which makes boxes wide. A space lets the
+ * backend wrap the label itself.
+ */
+const flattenLineBreaks = (src) => src.replace(/<br\s*\/?>/gi, " ");
+
 // ------------------------------------------------------------- markdown I/O
 
 /** CommonMark-ish fence scan: 3+ backticks/tildes, <=3 space indent, matching close. */
@@ -587,7 +644,10 @@ function cacheKeyFor(backend, src, ctx) {
     .digest("hex");
 }
 
-/** Render one mermaid block, trying backends in order, memoized on disk. */
+/**
+ * Render one mermaid block, trying backends in order, memoized on disk.
+ * The first art that fits ctx.width wins. If none fits, the narrowest wins.
+ */
 async function renderOne(src, ctx) {
   const type = diagramType(src) || "unknown";
   const order = backendOrder(type, ctx.forced, src);
@@ -599,26 +659,31 @@ async function renderOne(src, ctx) {
     return { ok: false, reason: `no renderer installed — ${hints}`, type };
   }
 
-  const renderSrc = normalizeShapes(src);
-  if (renderSrc !== src) debug(`normalized shapes for ${type}`);
+  const renderSrc = normalizeShapes(flattenLineBreaks(src));
+  if (renderSrc !== src) debug(`normalized source for ${type}`);
 
   const key = cacheKeyFor(available[0], renderSrc, ctx);
   const cached = readCache(key);
   if (cached) {
     debug(`cache hit (${type})`);
-    return { ...cached, type };
+    return cached.ok
+      ? { ...cached, type, width: artWidth(cached.out) }
+      : { ...cached, type };
   }
 
   const failures = [];
+  let best = null;
   for (const backend of available) {
     const tmp = backend.name === "merman" ? writeTemp(renderSrc) : null;
     try {
       const res = await renderWith(backend, renderSrc, ctx, tmp);
       if (res.ok) {
-        debug(`rendered ${type} with ${backend.name}`);
-        const value = { ok: true, out: res.out };
-        writeCache(key, value);
-        return { ...value, type, backend: backend.name };
+        const width = artWidth(res.out);
+        debug(`rendered ${type} with ${backend.name}, ${width} cols`);
+        if (!best || width < best.width)
+          best = { out: res.out, width, backend: backend.name };
+        if (width <= ctx.width) break;
+        continue;
       }
       failures.push(`${backend.name}: ${res.reason}`);
       debug(`failed ${type} with ${backend.name}: ${res.reason}`);
@@ -631,6 +696,11 @@ async function renderOne(src, ctx) {
         }
       }
     }
+  }
+
+  if (best) {
+    writeCache(key, { ok: true, out: best.out });
+    return { ok: true, out: best.out, type, ...best };
   }
 
   const reason = describeFailure(type, failures);
@@ -686,15 +756,18 @@ const STYLE_BG = {
   ascii: "none",
 };
 
-function styleFlag(flags) {
+/** Value of a glow flag given as `-s x`, `--style x` or `--style=x`. */
+function flagValue(flags, ...names) {
   for (let i = 0; i < flags.length; i++) {
     const f = flags[i];
-    if (f === "-s" || f === "--style") return flags[i + 1];
-    const m = /^(?:-s|--style)=(.*)$/.exec(f);
-    if (m) return m[1];
+    if (names.includes(f)) return flags[i + 1];
+    const name = names.find((n) => f.startsWith(`${n}=`));
+    if (name) return f.slice(name.length + 1);
   }
   return undefined;
 }
+
+const styleFlag = (flags) => flagValue(flags, "-s", "--style");
 
 /**
  * Background known from settings alone: "light", "dark", "none" (glow draws
@@ -843,12 +916,30 @@ function adaptForLight(art) {
 
 // ------------------------------------------------------------------- output
 
+/**
+ * A terminal wraps a line that is too wide, and the glow TUI cuts it. Both
+ * break the art. When the output cannot scroll sideways, show the source.
+ */
+function fitToViewport(results, maxWidth, canScroll) {
+  if (canScroll) return results;
+  return results.map((r) =>
+    r.ok && r.width > maxWidth
+      ? {
+          ok: false,
+          type: r.type,
+          reason: `too wide (${r.width} > ${maxWidth} cols), use -p to scroll`,
+        }
+      : r,
+  );
+}
+
 function renderBlockText(block, result, originalLines) {
   if (result.ok) {
     const art = result.out.replace(/\n+$/, "").split("\n");
     return ["```text", ...art, "```"];
   }
-  const note = `\x1b[2;3m⚠ mermaid (${result.type}) — shown as source: ${result.reason}\x1b[0m`;
+  // Markdown, not ANSI: the glow TUI shows raw escape codes as text.
+  const note = `*⚠ mermaid (${result.type}) — shown as source: ${result.reason.replace(/\*/g, "\\*")}*`;
   return [...originalLines.slice(block.startLine, block.endLine + 1), "", note];
 }
 
@@ -897,9 +988,10 @@ function parseArgs(argv) {
   return { flags, sources };
 }
 
-function spawnInherit(cmd, args, input) {
+function spawnInherit(cmd, args, input, env = process.env) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
+      env,
       stdio: [input == null ? "inherit" : "pipe", "inherit", "inherit"],
     });
     if (input != null) {
@@ -919,7 +1011,7 @@ function spawnInherit(cmd, args, input) {
  * with the same name, so the pager title stays correct. If the write fails,
  * give the original arguments to glow.
  */
-async function spawnTui(glowBin, flags, text, sourceFile, argv) {
+async function spawnTui(glowBin, flags, text, sourceFile, argv, rerender) {
   let dir;
   let file;
   try {
@@ -931,11 +1023,80 @@ async function spawnTui(glowBin, flags, text, sourceFile, argv) {
     if (dir) fs.rmSync(dir, { recursive: true, force: true });
     return spawnInherit(glowBin, argv);
   }
+  const live =
+    rerender && process.stdout.isTTY ? resizeWatcher(rerender, file, text) : null;
+  if (live) process.stdout.on("resize", live.schedule);
   try {
     return await spawnInherit(glowBin, [...flags, file]);
   } finally {
+    if (live) {
+      process.stdout.off("resize", live.schedule);
+      live.stop();
+    }
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * Render the document again after a terminal resize. glow -t reloads the
+ * file when it changes, but it also scrolls back to the top. So the file is
+ * written only when the text is different.
+ * A failed render or write keeps the file as it is.
+ */
+function resizeWatcher(render, file, first, delayMs = RESIZE_DELAY_MS) {
+  let last = first;
+  let timer = null;
+  let running = null;
+  let again = false;
+  let stopped = false;
+
+  const once = async () => {
+    let next;
+    try {
+      next = await render();
+    } catch (err) {
+      debug(`resize render failed: ${err.message}`);
+      return;
+    }
+    if (stopped || next === last) return;
+    const tmp = `${file}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmp, next);
+      fs.renameSync(tmp, file);
+      last = next;
+    } catch (err) {
+      debug(`resize write failed: ${err.message}`);
+      fs.rmSync(tmp, { force: true });
+    }
+  };
+
+  // A resize during a render starts one more render after it.
+  const update = () => {
+    if (running) {
+      again = true;
+      return running;
+    }
+    running = (async () => {
+      do {
+        again = false;
+        await once();
+      } while (again && !stopped);
+      running = null;
+    })();
+    return running;
+  };
+
+  return {
+    schedule() {
+      clearTimeout(timer);
+      timer = setTimeout(update, delayMs);
+    },
+    update,
+    stop() {
+      stopped = true;
+      clearTimeout(timer);
+    },
+  };
 }
 
 async function readStdin() {
@@ -966,6 +1127,7 @@ async function main() {
   // Paths where we cannot preprocess: glow takes only one SOURCE, and
   // help/version should behave exactly like glow.
   const interactive = flags.some((f) => f === "-t" || f === "--tui");
+  const paged = flags.some((f) => f === "-p" || f === "--pager");
   const informational = flags.some((f) =>
     ["-h", "--help", "-v", "--version"].includes(f),
   );
@@ -1006,33 +1168,61 @@ async function main() {
 
   const color = !process.env.NO_COLOR && process.env.TERM !== "dumb";
   const background = color ? await detectBackground(flags) : "none";
-  const ctx = {
-    width: Math.max(40, terminalWidth() - WIDTH_MARGIN),
+  const baseCtx = {
     theme: envOpt("THEME") || DEFAULT_THEME,
     color: color && background !== "none",
     forced: envOpt("BACKEND") || "auto",
   };
-  debug(
-    `context: ${JSON.stringify(ctx)} background=${background} blocks=${blocks.length}`,
-  );
+  // A pipe keeps the art: the reader can scroll it, for example with `less -S`.
+  const canScroll = paged || (!interactive && !process.stdout.isTTY);
 
-  let results = await mapLimit(blocks, MAX_PARALLEL, (block) => {
-    const src = dedent(block.body, block.indent);
-    return src.trim()
-      ? renderOne(src, ctx)
-      : Promise.resolve({ ok: false, type: "empty", reason: "empty block" });
-  });
-  if (background === "light") {
-    results = results.map((r) =>
-      r.ok ? { ...r, out: adaptForLight(r.out) } : r,
+  const renderDocument = async (env = process.env) => {
+    const ctx = {
+      ...baseCtx,
+      width: Math.max(40, terminalWidth(flags, env) - WIDTH_MARGIN),
+    };
+    debug(
+      `context: ${JSON.stringify(ctx)} background=${background} blocks=${blocks.length}`,
     );
-  }
+    let results = await mapLimit(blocks, MAX_PARALLEL, (block) => {
+      const src = dedent(block.body, block.indent);
+      return src.trim()
+        ? renderOne(src, ctx)
+        : Promise.resolve({ ok: false, type: "empty", reason: "empty block" });
+    });
+    if (background === "light") {
+      results = results.map((r) =>
+        r.ok ? { ...r, out: adaptForLight(r.out) } : r,
+      );
+    }
+    results = fitToViewport(results, ctx.width, canScroll);
+    return {
+      text: spliceResults(text, blocks, results),
+      tooWide: results.some((r) => r.ok && r.width > ctx.width),
+    };
+  };
 
+  const { text: rendered, tooWide } = await renderDocument();
   pruneCache();
-  const rendered = spliceResults(text, blocks, results);
 
-  if (interactive) return spawnTui(glowBin, flags, rendered, sourceFile, argv);
-  return spawnInherit(glowBin, [...flags, "-"], rendered);
+  if (interactive) {
+    // The live terminal size wins over a COLUMNS value from the start.
+    const rerender = async () =>
+      (
+        await renderDocument({
+          ...process.env,
+          COLUMNS: String(process.stdout.columns || ""),
+        })
+      ).text;
+    return spawnTui(glowBin, flags, rendered, sourceFile, argv, rerender);
+  }
+  // glow's default pager is `less -r`, which wraps. -S scrolls sideways.
+  // A PAGER the user set is kept.
+  const env =
+    paged && tooWide && !process.env.PAGER
+      ? { ...process.env, PAGER: "less -RS" }
+      : process.env;
+  return spawnInherit(glowBin, [...flags, "-"], rendered, env);
 }
 
 if (require.main === module) {
@@ -1052,4 +1242,10 @@ module.exports = {
   staticBackground,
   parseOscBackground,
   adaptForLight,
+  flattenLineBreaks,
+  artWidth,
+  terminalWidth,
+  glowWidth,
+  fitToViewport,
+  resizeWatcher,
 };
